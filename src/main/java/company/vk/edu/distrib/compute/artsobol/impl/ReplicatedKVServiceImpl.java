@@ -3,7 +3,9 @@ package company.vk.edu.distrib.compute.artsobol.impl;
 import com.sun.net.httpserver.HttpExchange;
 import com.sun.net.httpserver.HttpHandler;
 import com.sun.net.httpserver.HttpServer;
+import company.vk.edu.distrib.compute.AuditableKVService;
 import company.vk.edu.distrib.compute.ReplicatedService;
+import company.vk.edu.distrib.compute.artsobol.audit.KafkaAuditSender;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
@@ -14,7 +16,7 @@ import java.nio.charset.StandardCharsets;
 import java.nio.file.Path;
 import java.util.NoSuchElementException;
 
-public class ReplicatedKVServiceImpl implements ReplicatedService {
+public class ReplicatedKVServiceImpl implements ReplicatedService, AuditableKVService {
 
     private static final Logger log = LoggerFactory.getLogger(ReplicatedKVServiceImpl.class);
     private static final String METHOD_GET = "GET";
@@ -31,6 +33,7 @@ public class ReplicatedKVServiceImpl implements ReplicatedService {
     private final HttpServer server;
     private final int serverPort;
     private final ReplicationCoordinator coordinator;
+    private final KafkaAuditSender auditSender = new KafkaAuditSender();
     private boolean started;
     private boolean stopped;
 
@@ -65,6 +68,7 @@ public class ReplicatedKVServiceImpl implements ReplicatedService {
     public void stop() {
         if (!started) {
             coordinator.close();
+            auditSender.close();
             stopped = true;
             return;
         }
@@ -73,6 +77,7 @@ public class ReplicatedKVServiceImpl implements ReplicatedService {
         }
         server.stop(0);
         coordinator.close();
+        auditSender.close();
         started = false;
         stopped = true;
     }
@@ -97,6 +102,16 @@ public class ReplicatedKVServiceImpl implements ReplicatedService {
         coordinator.enableReplica(nodeId);
     }
 
+    @Override
+    public void setBootstrapServers(String bootstrapServers) {
+        auditSender.setBootstrapServers(bootstrapServers);
+    }
+
+    @Override
+    public void setAsync(boolean enabled) {
+        auditSender.setAsync(enabled);
+    }
+
     private void initServer() {
         server.createContext(STATUS_PATH, new ErrorHttpHandler(this::handleStatus));
         server.createContext(ENTITY_PATH, new ErrorHttpHandler(this::handleEntity));
@@ -112,7 +127,9 @@ public class ReplicatedKVServiceImpl implements ReplicatedService {
     }
 
     private void handleEntity(HttpExchange exchange) throws IOException {
+        long requestTimestamp = System.currentTimeMillis();
         EntityRequest request = EntityRequest.parse(exchange.getRequestURI().getRawQuery());
+        auditSender.send(exchange.getRequestMethod(), request.id(), requestTimestamp);
         coordinator.validateAck(request.ack());
 
         switch (exchange.getRequestMethod()) {
