@@ -11,6 +11,8 @@ import org.slf4j.LoggerFactory;
 
 import java.io.IOException;
 import java.time.Duration;
+import java.util.ArrayDeque;
+import java.util.Deque;
 import java.util.Properties;
 import java.util.concurrent.ExecutionException;
 import java.util.concurrent.atomic.AtomicBoolean;
@@ -22,8 +24,8 @@ public class KafkaAuditSender {
 
     private final ReentrantLock lock = new ReentrantLock();
     private final AtomicBoolean asyncAudit = new AtomicBoolean();
+    private final Deque<Producer<String, String>> auditProducers = new ArrayDeque<>(1);
     private String bootstrapServers;
-    private Producer<String, String> auditProducer;
 
     public void setBootstrapServers(String bootstrapServers) {
         if (bootstrapServers == null || bootstrapServers.isBlank()) {
@@ -57,9 +59,16 @@ public class KafkaAuditSender {
         );
 
         if (asyncAudit.get()) {
-            producer.send(record, (ignoredMetadata, exception) -> {
+            producer.send(record, (metadata, exception) -> {
                 if (exception != null) {
                     log.warn("Failed to send audit event asynchronously: method={}, id={}", method, id, exception);
+                } else if (log.isDebugEnabled()) {
+                    log.debug(
+                            "Audit event sent asynchronously: topic={}, partition={}, offset={}",
+                            metadata.topic(),
+                            metadata.partition(),
+                            metadata.offset()
+                    );
                 }
             });
             return;
@@ -87,14 +96,15 @@ public class KafkaAuditSender {
     private Producer<String, String> producer() {
         lock.lock();
         try {
-            if (auditProducer != null) {
-                return auditProducer;
+            if (!auditProducers.isEmpty()) {
+                return auditProducers.getFirst();
             }
             if (bootstrapServers == null) {
                 return null;
             }
-            auditProducer = new KafkaProducer<>(producerProperties());
-            return auditProducer;
+            Producer<String, String> producer = new KafkaProducer<>(producerProperties());
+            auditProducers.addFirst(producer);
+            return producer;
         } finally {
             lock.unlock();
         }
@@ -110,9 +120,8 @@ public class KafkaAuditSender {
     }
 
     private void closeProducer() {
-        if (auditProducer != null) {
-            auditProducer.close(Duration.ofSeconds(5));
-            auditProducer = null;
+        if (!auditProducers.isEmpty()) {
+            auditProducers.removeFirst().close(Duration.ofSeconds(5));
         }
     }
 }
